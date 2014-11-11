@@ -1,0 +1,10 @@
+{
+	"general": {
+	},
+	"chrome": {
+        "profile": {
+            "crx_key": "crxkey.pem",
+            "crx_key_path": "."
+        }
+    }
+}

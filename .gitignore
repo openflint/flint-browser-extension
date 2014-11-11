@@ -1,0 +1,6 @@
+forge-error.log
+development
+release
+node_modules
+.idea
+src/js/*
