@@ -16,131 +16,441 @@
 
 forge.logging.info "Flint extension background script is running !"
 
+###############################################################################
+#
+# HTTP
+#
+###############################################################################
+
+http_get = (message, reply) ->
+    # Use the REST api to request more information about this service
+    xhr = new XMLHttpRequest()
+    xhr.open "GET", message.params.url, true
+
+    if message.params.headers
+        for key in message.params.headers
+            xhr.setRequestHeader key, message.params.headers[key]
+
+    xhr.onreadystatechange = =>
+        if xhr.readyState == 4
+            if 200 <= xhr.status < 300
+                reply
+                    callid: message.callid
+                    status: 'success'
+                    content:
+                        status: xhr.status
+                        data: xhr.responseText
+            else
+                reply
+                    callid: message.callid
+                    status: 'error'
+                    content:
+                        status: xhr.status
+    xhr.send null
+
+http_post = (message, reply) ->
+    # Use the REST api to request more information about this service
+    xhr = new XMLHttpRequest()
+    xhr.open "POST", message.params.url, true
+    forge.logging.info "POST_URL : " + message.params.url
+
+    if message.params.headers
+        for key in message.params.headers
+            forge.logging.info key + " : " + message.params.headers[key]
+            xhr.setRequestHeader key, message.params.headers[key]
+
+    xhr.onreadystatechange = =>
+        if xhr.readyState == 4
+            if 200 <= xhr.status < 300
+                reply
+                    callid: message.callid
+                    status: 'success'
+                    content:
+                        status: xhr.status
+                        data: xhr.responseText
+            else
+                reply
+                    callid: message.callid
+                    status: 'error'
+                    content:
+                        status: xhr.status
+
+    if typeof message.params.data == 'string'
+        xhr.send message.params.data
+    else
+        xhr.send JSON.stringify(message.params.data)
+
+###############################################################################
+#
+# WebSocket
+#
+###############################################################################
+
 websockets = {}
 
+websocket_create = (message, reply) ->
+    id = forge.tools.UUID()
+
+    ws = new WebSocket message.params.url
+    ws.eventQueue = []
+
+    ws.onmessage = (event) =>
+        forge.logging.info 'websocket [' + id + '] onmessage'
+        # forge.logging.info event.data
+
+        if ws.pollPending
+            pending = ws.pollPending
+            ws.pollPending = null
+
+            pending.reply
+                callid: pending.callid
+                status: 'success'
+                content:
+                    type: 'onmessage'
+                    data: event.data
+                    readyState: ws.readyState
+        else
+            ws.eventQueue.push
+                type: 'onmessage'
+                data: event.data
+                readyState: ws.readyState
+
+    ws.onopen = =>
+        forge.logging.info 'websocket [' + id + '] onopen'
+
+        if ws.pollPending
+            pending = ws.pollPending
+            ws.pollPending = null
+
+            pending.reply
+                callid: pending.callid
+                status: 'success'
+                content:
+                    type: 'onopen'
+                    readyState: ws.readyState
+        else
+            ws.eventQueue.push
+                type: 'onopen'
+                readyState: ws.readyState
+
+    ws.onclose = =>
+        forge.logging.info 'websocket [' + id + '] onclose'
+        if ws.pollPending
+            pending = ws.pollPending
+            ws.pollPending = null
+
+            pending.reply
+                callid: pending.callid
+                status: 'success'
+                content:
+                    type: 'onclose'
+                    readyState: ws.readyState
+        else
+            ws.eventQueue.push
+                type: 'onclose'
+                readyState: ws.readyState
+
+    ws.onerror = =>
+        forge.logging.info 'websocket [' + id + '] onerror'
+        if ws.pollPending
+            pending = ws.pollPending
+            ws.pollPending = null
+
+            pending.reply
+                callid: pending.callid
+                status: 'success'
+                content:
+                    type: 'onerror'
+                    readyState: ws.readyState
+        else
+            ws.eventQueue.push
+                type: 'onerror'
+                readyState: ws.readyState
+
+    websockets[id] = ws
+
+    reply
+        callid: message.callid
+        status: 'success'
+        content:
+            id: id
+#
+# { callid: 1,
+#   method: 'websocket:poll-event' }
+#
+websocket_poll_event = (message, reply) =>
+    id = message.params.id
+    ws = websockets[id]
+
+    if ws
+        if ws.eventQueue.length > 0
+            reply
+                callid: message.callid
+                status: 'success'
+                content: ws.eventQueue.shift()
+
+        else if ws.pollPending
+            reply
+                callid: message.callid
+                status: 'error'
+                content:
+                    status: 'PoolEvent Request is exists'
+
+        else
+            ws.pollPending =
+                callid: message.callid
+                reply: reply
+    else
+        reply
+            callid: message.callid
+            status: 'error'
+            content:
+                status: 'WebSocket does not exists'
+
+websocket_send = (message, reply) ->
+    id = message.params.id
+    ws = websockets[id]
+    if ws
+        console.log (typeof message.params.data);
+        console.log (message.params.data);
+        ws.send(message.params.data)
+        reply
+            callid: message.callid
+            status: 'success'
+    else
+        reply
+            callid: message.callid
+            status: 'error'
+            content:
+                status: 'WebSocket does not exists'
+
+###############################################################################
+#
+# XMLHttpRequest
+#
+# TODO: xhr:poll-event 事件泵，可以用来维系生命周期
+#
+###############################################################################
+
+xhrs = {}
+
+#
+# { callid: 1,
+#   method: 'xhr:create',
+#   params: xxx
+# }
+
+xhr_create = (message, reply) =>
+    id = forge.tools.UUID()
+
+    xhr = new XMLHttpRequest(message.params)
+    xhr.eventQueue = []
+
+    xhrs[id] = xhr
+
+    xhr.onreadystatechange = =>
+        evt =
+            type: 'onreadystatechange'
+            readyState: xhr.readyState
+
+        if xhr.readyState == 0 # UNSENT open()has not been called yet.
+            # ignore
+        else if xhr.readyState == 1 # OPENED send() has not been called yet.
+            # ignore
+        else
+            evt.status = xhr.status
+            evt.statusText = xhr.statusText
+            evt.responseHeaders = xhr.getAllResponseHeaders()
+
+            if xhr.readyState == 2 # HEADERS_RECEIVED send() has been called, and headers and status are available.
+                # ignore
+            else if xhr.readyState == 3 # LOADING Downloading; responseText holds partial data.
+                # ignore partial data
+            else if xhr.readyState == 4 # DONE The operation is complete.
+                evt.responseText = xhr.responseText
+
+        if xhr.pollPending
+            pending = xhr.pollPending
+            xhr.pollPending = null
+            pending.reply
+                callid: pending.callid
+                status: 'success'
+                content: evt
+        else
+            xhr.eventQueue.push evt
+
+    reply
+        callid: message.callid
+        status: 'success'
+        content:
+            id: id
+
+#
+# { callid: 1,
+#   method: 'xhr:open',
+#   params: {
+#     method: 'GET' or 'POST',
+#     url: 'http://www.163.com',
+#   }
+# }
+#
+xhr_open = (message, reply) =>
+    id = message.params.id
+    xhr = xhrs[id]
+
+    if xhr
+        xhr.open(message.params.method, message.params.url, true)
+        reply
+            callid: message.callid
+            status: 'success'
+            content:
+                id: id
+    else
+        reply
+            callid: message.callid
+            status: 'error'
+            content:
+                status: 'XHR does not exists'
+
+#
+# { callid: 1,
+#   method: 'xhr:poll-event',
+#   params: {
+#     method: 'GET' or 'POST',
+#     url: 'http://www.163.com',
+#   }
+# }
+
+xhr_poll_event = (message, reply) =>
+    id = message.params.id
+    xhr = xhrs[id]
+
+    if xhr
+        if xhr.eventQueue.length > 0
+            reply
+                callid: message.callid
+                status: 'success'
+                content: xhr.eventQueue.shift()
+
+        else if xhr.pollPending
+            reply
+                callid: message.callid
+                status: 'error'
+                content:
+                    status: 'PoolEvent Request is exists'
+
+        else
+            xhr.pollPending =
+                callid: message.callid
+                reply: reply
+    else
+        reply
+            callid: message.callid
+            status: 'error'
+            content:
+                status: 'XHR does not exists'
+
+#
+# { callid: 1,
+#   method: 'xhr:send',
+#   params: {
+#     data: 'xxxx'
+#   }
+# }
+xhr_send = (message, reply) =>
+    id = message.params.id
+    xhr = xhrs[id]
+
+    if xhr
+        xhr.send(message.params.data)
+        reply
+            callid: message.callid
+            status: 'success'
+            content:
+                id: id
+    else
+        reply
+            callid: message.callid
+            status: 'error'
+            content:
+                status: 'XHR does not exists'
+
+#
+# { callid: 1,
+#   method: 'xhr:set-request-header',
+#   params: {
+#     header: 'xxxx',
+#     value: 'yyyy'
+#   }
+# }
+#
+xhr_set_request_header = (message, reply) =>
+    id = message.params.id
+    xhr = xhrs[id]
+
+    if xhr
+        xhr.setRequestHeader(message.params.header, message.params.value)
+        reply
+            callid: message.callid
+            status: 'success'
+            content:
+                id: id
+    else
+        reply
+            callid: message.callid
+            status: 'error'
+            content:
+                status: 'XHR does not exists'
+
+
 callback = (message, reply) =>
-    forge.logging.info message
+    if message.method isnt 'http:get'
+        forge.logging.info message
 
     # message {
     #     callid: callid
     #     method: method
     #     params: params
     # }
+
+    #
+    # HTTP
+    #
     if message.method is 'http:get'
-        # Use the REST api to request more information about this service
-        xhr = new XMLHttpRequest()
-        xhr.open "GET", message.params.url, true
-
-        if message.params.headers
-            for key in payload.headers
-                xhr.setRequestHeader key, message.params.headers[key]
-
-        listener = =>
-            if 200 <= xhr.status < 300
-                reply
-                    callid: message.callid
-                    status: 'success'
-                    content:
-                        status: xhr.status
-                        data: xhr.responseText
-            else
-                reply
-                    callid: message.callid
-                    status: 'error'
-                    content:
-                        status: xhr.status
-
-        xhr.addEventListener "load", listener, false
-        xhr.send null
+        http_get message, reply
 
     else if message.method is 'http:post'
-        # Use the REST api to request more information about this service
-        xhr = new XMLHttpRequest()
-        xhr.open "POST", message.params.url, true
+        http_post message, reply
 
-        if message.params.headers
-            for key in payload.headers
-                xhr.setRequestHeader key, message.params.headers[key]
+        #
+        # WebSocket
+        #
+    else if message.method is 'ws:create'
+        websocket_create message, reply
 
-        listener = =>
-            if 200 <= xhr.status < 300
-                reply
-                    callid: message.callid
-                    status: 'success'
-                    content:
-                        status: xhr.status
-                        data: xhr.responseText
-            else
-                reply
-                    callid: message.callid
-                    status: 'error'
-                    content:
-                        status: xhr.status
+    else if message.method is 'ws:poll-event'
+        websocket_poll_event message, reply
 
-        xhr.addEventListener "load", listener, false
-        xhr.send message.params.data
+    else if message.method is 'ws:send'
+        websocket_send message, reply
 
-        # { callid: 1,
-        #   method: 'websocket:create',
-        #   params: { url: 'ws://192.168.1.173:8080/channels/demo' } }
+        #
+        # XHR
+        #
+    else if message.method is 'xhr:create'
+        xhr_create(message, reply)
 
-    else if message.method is 'websocket:create'
-        id = forge.tools.UUID()
+    else if message.method is 'xhr:poll-event'
+        xhr_poll_event(message, reply)
 
-        ws = new WebSocket message.params.url
-        ws.pendings = []
-        ws.messages = []
-        ws.onmessage = (event) =>
-            if ws.pendings.length > 0
-                pending = ws.pendings.shift()
-                pending.reply
-                    callid: pending.message.callid
-                    status: 'success'
-                    content:
-                        data: [ event.data ]
-            else
-                ws.messages.push event.data
+    else if message.method is 'xhr:open'
+        xhr_open(message, reply)
 
-        websockets[id] = ws
+    else if message.method is 'xhr:send'
+        xhr_send(message, reply)
 
-        reply
-            callid: message.callid
-            status: 'success'
-            content:
-                id: id
-
-    else if message.method is 'websocket:get-message'
-        id = message.params.id
-        ws = websockets[id]
-        if ws
-            if ws.messages
-                if ws.messages.length > 0
-                    reply
-                        callid: message.callid
-                        status: 'success'
-                        content:
-                            data: ws.messages
-                    ws.messages = []
-                else
-                    ws.pendings.push
-                        message: message,
-                        reply: reply
-            else
-                if ws.readyState == 2 or ws.readyState == 3
-                    reply
-                        callid: message.callid
-                        status: 'error'
-                        content:
-                            status: 'closed'
-
-    else if message.method is 'websocket:send-message'
-        id = message.params.id
-        ws = websockets[id]
-        if ws
-            ws.send message.params.data
-            reply
-                callid: message.callid
-                status: 'success'
+    else if message.method is 'xhr:set-request-header'
+        xhr_set_request_header(message, reply)
 
 error = (content) =>
     forge.logging.error content

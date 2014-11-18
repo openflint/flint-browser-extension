@@ -14,10 +14,9 @@
 # limitations under the License.
 #
 
-window.addEventListener 'message', (event) =>
+forge.logging.info('FlintAssistant content-script is running ...');
 
-    # if invalid source
-    return if event.source isnt window
+window.addEventListener 'message', (event) =>
 
     message = event.data;
 
